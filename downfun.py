@@ -39,24 +39,25 @@ def balratios(ticker):
             x = bal[item]
         except KeyError:
             x = np.repeat(0, bal[:].shape[1])
+            
         return [i if i > 0 else 0 for i in x]
     
     totas = bal['Total Assets']
     totli = bal['Total Liab']
     toteq = bal['Total Stockholder Equity']
     try:
-        coa = bal['Total Current Assets'] - zerokey_solve(bal['Short Term Investments'])
+        coa = bal['Total Current Assets'] - zerokey_solve('Short Term Investments')
     except KeyError:
         coa = bal['Total Current Assets']
     try:
-        col = bal['Total Current Liabilities'] - zerokey_solve(bal['Short Long Term Debt'])
+        col = bal['Total Current Liabilities'] - zerokey_solve('Short Long Term Debt')
     except KeyError:
         col = bal['Total Current Liabilities']
     #yahoo finance has WC as CurrentAs - CurrentLi, we also substract ST Investments and ST Debt to get OPERATING WC
-    wc = bal['Total Current Assets'] - zerokey_solve(bal['Total Current Liabilities'])
+    wc = bal['Total Current Assets'] - zerokey_solve('Total Current Liabilities')
     oper_wc = coa - col
-    toa = bal['Total Assets'] - bal['Total Current Assets'] - zerokey_solve(bal['Long Term Investments'])
-    tol = bal['Total Liab'] - bal['Total Current Liabilities'] - zerokey_solve(bal['Long Term Debt'])
+    toa = bal['Total Assets'] - bal['Total Current Assets'] - zerokey_solve('Long Term Investments')
+    tol = bal['Total Liab'] - bal['Total Current Liabilities'] - zerokey_solve('Long Term Debt')
     #yf has IC has equity + ST debt + LT debt
     ic = toa - tol + oper_wc
     fl = bal['Total Liab'] - tol - col
