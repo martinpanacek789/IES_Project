@@ -11,6 +11,7 @@ def get_Ticker(tickers, start, end):
 #---------------------------------------------------------------------------------------------------------------------------------
 
 #function getting all tickers' balance sheet items
+##Without Session yfinance does not return balance sheets and financials now
 def get_bsitems(tickers):
     stocks = yf.Tickers(" ".join(tickers))
     bs = [stocks.tickers[i].get_balance_sheet() for i in tickers] #non-named list of balance sheets
@@ -42,10 +43,10 @@ financials_items = {'Cost Of Revenue',
  'Total Other Income Expense Net',
  'Total Revenue'}
 
-def finratios(ticker):
-    
-    fs = yf.Ticker(ticker).financials
-    fin = fs.loc
+def finratios(ticker, sesh = None):
+    ##SOLVE for empty financials!!!!
+    fs = yf.Ticker(ticker, session = sesh).financials
+    fin = fs.loc #inefficient, yf.Ticker object as input?
     
     if all(item in financials_items for item in fs.index) == False:
         print(f"\033[30;0;41m WARNING!!! One or more balance sheet items were not recognized\n" + '-'*80)
@@ -64,13 +65,14 @@ def finratios(ticker):
     interest_rate = fin['Interest Expense']/fin['Net Income']
     sga_to_sales = fin['Selling General Administrative']/fin['Total Revenue']
     rd_intensity = fin['Research Development']/fin['Total Revenue']
-    
+    #effective_tax = pd.Series([effective_tax[i] if effective_tax[i] > 0 else np.nan for i in range(effective_tax.shape[0])],
+                             #index = oper_margin.index) accounts for negative ratio
     return pd.DataFrame([rev, ni, noplat, ns_growth, ni_growth, gro_margin, oper_margin, net_margin, nfe,
                          ir_exp, interest_rate, effective_tax, 
                          sga_to_sales, rd_intensity],
-                        index = ['totrev','ni','noplat', 'ns_growth','ni_growth','gmargin',
-                                 'omargin','nmargin', 'nfe', 'int_exp', "ir", "eftax",
-                                 'sga_to_sales','rd_intensity'])
+                        index = ['Total Revenue','Net Income','NOPLAT', 'gNS','gNI','Gross Margin',
+                                 'Operating Margin','Net Margin', 'Net Financial Expense', 'Interest Expense', "Interest Rate", "Effective Tax Rate",
+                                 'SGA_to_Sales','RD Intensity'])
 #---------------------------------------------------------------------------------------------------------------------------------
 
 balance_items = {'Accounts Payable',
@@ -103,15 +105,16 @@ balance_items = {'Accounts Payable',
  'Total Stockholder Equity',
  'Treasury Stock'}
 
-def balratios(ticker):
+def balratios(ticker, sesh = None):
     
-    bs = yf.Ticker(ticker).get_balance_sheet()
+    t = yf.Ticker(ticker, session = sesh)
+    bs = t.get_balance_sheet()
     bal = bs.loc
    
     if all(item in balance_items for item in bs.index) == False:
         print(f"\033[30;0;41m WARNING!!! One or more balance sheet items were not recognized\n" + '-'*80)
        
-    def zerokey_solve(item):
+    def zerokey_solve(item): #incorporated KeyError
         try:
             x = bal[item]
         except KeyError:
@@ -122,8 +125,8 @@ def balratios(ticker):
     totli = bal['Total Liab']
     toteq = bal['Total Stockholder Equity']
     coa = bal['Total Current Assets'] - zerokey_solve('Short Term Investments') #all cash is operating
-    col = zerokey_solve('Accounts Payable') + zerokey_solve('Other Current Liab') 
-    #yf has WC as CurrentAs - CurrentLi, we also substract ST Investments and ST Debt to get OPERATING WC
+    col = zerokey_solve('Accounts Payable') + zerokey_solve('Other Current Liab') #bal['Total Current Liabilities'] - zerokey_solve('Short Long Term Debt')
+    #yahoo finance has WC as CurrentAs - CurrentLi, we also substract ST Investments and ST Debt to get OPERATING WC
     wc = bal['Total Current Assets'] - zerokey_solve('Total Current Liabilities')
     oper_wc = coa - col
     toa = bal['Total Assets'] - bal['Total Current Assets'] - zerokey_solve('Long Term Investments')
@@ -142,33 +145,33 @@ def balratios(ticker):
     #test that COA + TOA + FA = Total Assets
     #test that COL + TOL + FL = Total Liab
     #test that COA + TOA + FA - COL - TOL - FL - EQ = 0
-    return {'Total Assets' : totas, 'Total Liabilities' : totli, 'Total Equity' : toteq,
+    return pd.DataFrame({'Total Assets' : totas, 'Total Liabilities' : totli, 'Total Equity' : toteq,
             'Current Operating Assets' : coa, 'Current Operating Liabilties' : col,
             'Working Capital' : wc, 'Operating Working Capital' : oper_wc, 
             'LT Operating Assets' : toa, 'LT Operating Liabilities' : tol,
             'NTA' : nta,
             'Financing Liabilities' : fl, 'Financing Assets' : fa, 
             'Invested Capital' : ic,'Debt-Cash' : debt_net_cash, "Net Debt" : nd, 'Cash and Equivalents' : cash_eq,
-            'EEQ' : eeq}
+            'EEQ' : eeq}).T
 
 #---------------------------------------------------------------------------------------------------------------------------------
 
 #retrieved ratios for financial analysis
-def fin_analysis(ticker):
-    fin = finratios(ticker).loc
-    bal = pd.DataFrame(balratios(ticker)).T.loc #need to merge formats
+def fin_analysis(ticker, sesh = None):
+    fin = finratios(ticker, sesh).loc
+    bal = balratios(ticker, sesh).loc #need to merge formats
      
     # invested capital and interest rate needs tweaking 
-    pm = fin['noplat']/fin['totrev']
-    roe = fin['ni']/bal['EEQ'].shift(-1)
-    roic = fin['noplat']/bal['Invested Capital'].shift(-1)
-    ir = fin['int_exp']/bal['Net Debt'].shift(-1)
-    nfe_nd = fin['nfe']/bal['Net Debt'].shift(-1)
+    pm = fin['NOPLAT']/fin['Total Revenue']
+    roe = fin['Net Income']/bal['EEQ'].shift(-1)
+    roic = fin['NOPLAT']/bal['Invested Capital'].shift(-1)
+    ir = fin['Interest Expense']/bal['Net Debt'].shift(-1)
+    nfe_nd = fin['Net Financial Expense']/bal['Net Debt'].shift(-1)
     fin_lev = bal['Net Debt']/bal['EEQ']
     spr = roic-ir
-    icto = fin['totrev']/bal['Invested Capital'].shift(-1)
-    ntat = fin['totrev']/bal['NTA'].shift(-1)
-    wct = fin['totrev']/bal['Operating Working Capital'].shift(-1)
+    icto = fin['Total Revenue']/bal['Invested Capital'].shift(-1)
+    ntat = fin['Total Revenue']/bal['NTA'].shift(-1)
+    wct = fin['Total Revenue']/bal['Operating Working Capital'].shift(-1)
     
     return pd.DataFrame([pm, roe,roic,nfe_nd,ir, fin_lev,spr, icto,ntat,wct],
                         index = ['PM','ROE','ROIC','netIR','IR','FINLEV','SPR','ICTO','NTAT','WCT'])
