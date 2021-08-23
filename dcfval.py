@@ -9,7 +9,10 @@ import requests
 import time
 import warnings
 from bs4 import BeautifulSoup
+from tqdm import tqdm
 
+idx = pd.IndexSlice
+#from damoscrape import *
 from damoscrape import *
 
 
@@ -66,13 +69,21 @@ balance_items = {'Accounts Payable',
  'Total Stockholder Equity',
  'Treasury Stock'}
 
+SPDR_ETF = {'Technology' : 'XLK', 'Energy' : 'XLE', 'Financials' : 'XLF',
+            'Financial Services' : 'XLF', 'Consumer Cyclical' : 'XLY',
+            'Consumer Defensive' : 'XLP', 'Healthcare' : 'XLV',
+            'Real Estate' : 'XLRE', 'Basic Materials' : 'XLB',
+            'Utilities' : 'XLU','Industrials' : 'XLI'}
+
 def finratios(ticker, sesh = None):
+    
     '''
     Returns pandas DataFrame with reconstructed financials, including margins, growth rates, interest rate and effectvie tax measures.
     
-    First column represents Trailing 12 Months till the last reported quarter. Remaining columns represent annual financials reports.
+    First column represents Trailing 12 Months data till the last reported quarter. Remaining columns represent annual financials reports.
+    Note: NA values are filled with zeroes
     
-    Arguments
+    Args
     -----------
     ticker: str or yf.Ticker object
         Company's ticker according to Yahoo Finance. Alternatively, corresponding yf.Ticker object can be passed
@@ -81,7 +92,7 @@ def finratios(ticker, sesh = None):
         
     Warnings
     -----------
-    Writes out warning if some financials items are not recognised (based on default pre-existing set of items)
+    Hands out warning if some financials items are not recognised (based on default pre-existing set of items)
     '''
     
     if isinstance(ticker, yf.Ticker):
@@ -124,7 +135,7 @@ def balratios(ticker, sesh = None):
     
     '''
     Returns pandas DataFrame with reconstructed balance sheet items more suited for valuation.
-    DISCLAIMER: NA's are filled with zeroes
+    Note: NA values are filled with zeroes
     
     Arguments
     -----------
@@ -135,7 +146,7 @@ def balratios(ticker, sesh = None):
         
     Warnings
     -----------
-    Writes out warning if some balance sheet items are not recognised (based on default pre-existing set of items)
+    Hands out warning if some balance sheet items are not recognised (based on default pre-existing set of items)
     '''
     
     if isinstance(ticker, yf.Ticker):
@@ -146,7 +157,7 @@ def balratios(ticker, sesh = None):
     
     bs = pd.concat([bs_q.iloc[:,0], bs], axis = 1).fillna(0)
     bal = bs.loc
-    if all(item in balance_items for item in bs.index) == False:
+    if all(item in balance_items for item in bs.index) is False:
         print(f"\033[30;0;41m WARNING!!! One or more balance sheet items were not recognized\n" + '-'*80)
 
     def zerokey_solve(item):
@@ -166,45 +177,63 @@ def balratios(ticker, sesh = None):
     ###Operating Items
     ##COA assumets all cash is operating
     coa = bal['Total Current Assets'] - zerokey_solve('Short Term Investments')
-    ##Alternatively could be defined as TotalCurrentLi - Short Long Term Debt
-    col = zerokey_solve('Accounts Payable') + zerokey_solve('Other Current Liab')
-    ##Yahoo finance has WC as CurrentAs - CurrentLi, we also substract ST Investments and ST Debt to get OPERATING WC
+    ##Alternatively could be defined as zerokey_solve('Accounts Payable') + zerokey_solve('Other Current Liab')
+    col = bal['Total Current Liabilities'] - zerokey_solve('Short Long Term Debt')
+    # zerokey_solve('Accounts Payable') + zerokey_solve('Other Current Liab')
+    ##Yahoo finance has WC as CurrentAs - CurrentLi
+    ##...to get OPERATING WC ST Investments and ST Debt are subtracted
     wc = bal['Total Current Assets'] - zerokey_solve('Total Current Liabilities')
     oper_wc = coa - col
     ##Long Term Operating Items
     toa = bal['Total Assets'] - bal['Total Current Assets'] - zerokey_solve('Long Term Investments')
     tol = bal['Total Liab'] - bal['Total Current Liabilities'] - zerokey_solve('Long Term Debt')
-    #YF has NTA as TotAs - Li - Intangibles - Goodwill
+    ##YF has NTA as TotAs - Li - Intangibles - Goodwill
+    #NTA = Net Long Term Operating Assets
     nta = toa - tol
-    #YF has IC has equity + ST debt + LT debt
+    ##YF has IC has equity + ST debt + LT debt
+    #LT assets - LTinv - LT Liab + LT Debt + CurAs - ST Inv - CurLi + ST Debt = TotAs - TotLi + LT Debt + StDebt - StInv - LtInv
+    #The defined IC does not include short term and long term investments compared to YF!!!
     ic = nta + oper_wc
+    ic_inv = nta + oper_wc + zerokey_solve('Long Term Investments') + zerokey_solve('Short Term Investments')
     
     ###Financing Items
-    ##TotLi - TotLi + CurrentLi + LT Debt - CurrentLi + ST Debt
+    ##TotLi - TotLi + CurrentLi + LT Debt - CurrentLi + ST Debt --> ST + LT Debt
     fl = bal['Total Liab'] - tol - col
-    ##TotAs - TotAs + CurAs + LT Investments - CurAs + ST Investments
+    ##TotAs - TotAs + CurAs + LT Investments - CurAs + ST Investments --> LT + ST Investments
     fa = bal['Total Assets'] - toa - coa
     ##Debt Metrics
     debt_net_cash = fl - zerokey_solve('Cash')
-    #YF has ND as EQ + LT/ST debt, here it is ST debt + LT debt - ST inv - LT inv (cash excluded!!!)
+    #YF has ND as EQ + LT/ST debt
+    #Here defined as ST debt + LT debt - ST inv - LT inv (cash excluded!!!)
     nd = fl - fa
+    
     cash_eq = bal['Cash'] + zerokey_solve('Short Term Investments')
     
     ###Total Equity Check
     eeq = ic - nd
 
-    ###Test that COA + TOA + FA = Total Assets, May be exchange for soft checks only
+    ###Test that COA + TOA + FA = Total Assets, May be exchanged for soft checks only
     assert all(coa + toa + fa == totas), f'Balance Sheet unstable, COA + TOA + FA does not equal Total Assets'
     ###Test that COL + TOL + FL = Total Liab
     assert all(col + tol + fl == totli), f'Balance Sheet unstable, COL + TOL + FL does not equal Total Liabilities'
-    ###Test that COA + TOA + FA - COL - TOL - FL - EQ = 0, Invalid check since some tickers on Yahoo Finance have recorded non-matching balance sheets
+    ###Test that COA + TOA + FA - COL - TOL - FL - EQ = 0, Soft check only since some tickers on Yahoo Finance have recorded non-matching balance sheets
+    ##Some balance sheet items not recorded correctly as equity minority interest preferred equity etc not included in yfinance balance sheet
+    #Only warnings thrown out instead of assert statements
+    if all(coa + toa + fa - col - tol - fl != toteq):
+        warnings.warn(f'WARNING: Balance sheet is unstable, Total Assets + Total Liabilities != EEQ. Proceed with caution: \
+        {ticker.ticker if isinstance(ticker,yf.Ticker) else ticker}', UserWarning)
+    
+    if all(toteq != eeq):
+        warnings.warn(f'WARNING: Balance sheet is unstable, IC - ND != EEQ. Proceed with caution: \
+        {ticker.ticker if isinstance(ticker,yf.Ticker) else ticker}', UserWarning)
     #assert all(coa + toa + fa - col - tol - fl == toteq), f'Balance Sheet unstable, Total Assets + Total Liabilities != EEQ'
 
     return pd.DataFrame({'Total Assets' : totas, 'Total Liabilities' : totli, 'Total Equity' : toteq,
-            'Current Operating Assets' : coa, 'Current Operating Liabilities' : col, 'Working Capital' : wc,
-            'Operating Working Capital' : oper_wc, 'LT Operating Assets' : toa, 'LT Operating Liabilities' : tol,
-            'NTA' : nta, 'Financing Liabilities' : fl, 'Financing Assets' : fa, 'Invested Capital' : ic,
-            'Debt-Cash' : debt_net_cash, "Net Debt" : nd, 'Cash and Equivalents' : cash_eq, 'EEQ' : eeq}).T
+                         'Current Operating Assets' : coa, 'Current Operating Liabilities' : col, 'Working Capital' : wc,
+                         'Operating Working Capital' : oper_wc, 'LT Operating Assets' : toa, 'LT Operating Liabilities' : tol,
+                         'NTA' : nta, 'Financing Liabilities' : fl, 'Financing Assets' : fa, 'Invested Capital' : ic,
+                         'IC (incl. Investment)' : ic_inv, 'Debt-Cash' : debt_net_cash, "Net Debt" : nd,
+                         'Cash and Equivalents' : cash_eq, 'EEQ' : eeq}).T
     
 def fin_analysis(ticker, sesh = None):
     '''
@@ -222,9 +251,11 @@ def fin_analysis(ticker, sesh = None):
     bal = balratios(ticker, sesh).loc
 
     ###Invested capital and interest rate needs tweaking 
+    ##ROIC (inc. inv) uses Invested Capital with inclusion of Investments (assumes financial income is part of operating income.)
     pm = fin['NOPLAT']/fin['Total Revenue']
     roe = fin['Net Income']/bal['EEQ'].shift(-1)
     roic = fin['NOPLAT']/bal['Invested Capital'].shift(-1)
+    roic_inv = fin['NOPLAT']/bal['IC (incl. Investment)'].shift(-1)
     ir = fin['Interest Expense']/bal['Net Debt'].shift(-1)
     nfe_nd = fin['Net Financial Expense']/bal['Net Debt'].shift(-1)
     fin_lev = bal['Net Debt']/bal['EEQ']
@@ -233,8 +264,8 @@ def fin_analysis(ticker, sesh = None):
     ntat = fin['Total Revenue']/bal['NTA'].shift(-1)
     wct = fin['Total Revenue']/bal['Operating Working Capital'].shift(-1)
 
-    return pd.DataFrame([pm, roe,roic,nfe_nd,ir, fin_lev,spr, icto,ntat,wct],
-                        index = ['PM','ROE','ROIC','netIR','IR','FINLEV','SPR','ICTO','NTAT','WCT'])
+    return pd.DataFrame([pm, roe,roic, roic_inv, nfe_nd,ir, fin_lev,spr, icto,ntat,wct],
+                        index = ['PM','ROE','ROIC', 'ROIC (incl. inv)','netIR','IR','FINLEV','SPR','ICTO','NTAT','WCT'])
 
 #---------------------------------------------------------------------------------------------------------------------------------
 
@@ -248,8 +279,8 @@ def get_quarter(date):
 
 def get_endPrevQuarter(date):
     '''
-    Returns the ending date of the last quarter. If the ending date of the CURRENT quarter is given, function returns PREVIOUS quarter ending date, i.e. when
-    xxxx-12-31 is given function returns xxxx-09-31 end of Q3.
+    Returns the ending date of the last quarter. If the ending date of the CURRENT quarter is given,
+    function returns PREVIOUS quarter ending date, i.e. when xxxx-12-31 is given function returns xxxx-09-31 end of Q3.
     '''
     quarter = (date.month - 1)//3 + 1
     return dt.date(date.year, 3*(quarter-1)%12 + 1,1) - dt.timedelta(days = 1)
@@ -276,6 +307,14 @@ def getMktcap(ticker, date = dt.date.today() + dt.timedelta(days = - 2)):
     '''
     Returns ticker's market capitalisation at the end of the previous quarter,
     using the price prevailing at the end of the last quarter and last reported sharesOutstanding.
+    
+    Market capitalisation computed using the closing price on the specified date and CURRENT number of shares outstanding.
+    Args
+    -----------
+    ticker: str or yf.Ticker object
+        Company's ticker on Yahoo Finance or yf.Ticker from yfinance module
+    date: datetime obj, default two days before the current date
+        Date when market cap is recorded
     '''
     try:
         if isinstance(ticker, yf.Ticker):
@@ -285,7 +324,7 @@ def getMktcap(ticker, date = dt.date.today() + dt.timedelta(days = - 2)):
             t = yf.Ticker(ticker)
             price = t.history(start = date, end = date + dt.timedelta(days = 5)).iloc[1]['Close']
             shares_out = t.info['sharesOutstanding'] if t.info['impliedSharesOutstanding'] is None else t.info['impliedSharesOutstanding']
-    ##Except Clause handling peculiar cases when impliedSharesOutstanding instead of being None is not included
+    ##Except Clause handling peculiar cases when the impliedSharesOutstanding key instead of being None is not included
     except KeyError:
         if isinstance(ticker,yf.Ticker):
             price = ticker.history(start = date, end = date + dt.timedelta(days = 5)).iloc[1]['Close']
@@ -394,16 +433,16 @@ class Valuation:
     
     def __init__(self, ticker,sesh = None):
         self.sesh = sesh
-        self.ticker = ticker
+        self.ticker = ticker.upper()
+        self.yfticker = yf.Ticker(self.ticker, session = self.sesh)
         ###Proxy control for invalid ticker
-        self.yfticker = yf.Ticker(ticker, session = self.sesh)
         try:
             self.sector = self.yfticker.info['sector']
         except Exception:
             raise ValueError(f'Unable to retrieve: {ticker}. Company may be delisted or not recorded')
         
-        if any(sector in self.yfticker.info['sector'] for sector in ['Utility','Utilit','Financ','Bank']):
-            raise ValueError(f'Forbidden ticker: {self.sector}. Companies in Financials and Utilities sectors are invalid for valuation.')
+        if any(sector in self.yfticker.info['sector'] for sector in ['Utility','Utili','Financ','Bank']):
+            raise ValueError(f'Invalid ticker: {self.sector}. Companies in Financials and Utilities sectors are invalid for valuation.')
         
         #Composition Method instead of inheriting all
         self.damo = DamoData()
@@ -422,6 +461,7 @@ class Valuation:
         self.kd = None
         self.wacc = None
         self.forecast = None
+        self.horizon_wacc = None
         self.hv = None
         self.estimate = None
     
@@ -474,14 +514,16 @@ class Valuation:
         '''
         Returns CAPM beta using data from defined period and frequency.
         
+        Market portfolio proxied by S&P 500 index (^GSPC ticker on YF).
+        Risk-free rate by default proxied by 10Y Treasury bonds (^TNX ticker on YF).
         Args:
         ----------------
         period: str
             Data window
         frequency: str
             Frequency of the data
-        rf: by default None
-            By default (rf = None) 10Y Treasury Bond is used as the risk-free rate. Ticker ^TNX on Yahoo Finance.
+        rf: int, float, default None
+            By default (rf = None) 10Y Treasury Bond is used as the risk-free rate. Ticker '^TNX' on Yahoo Finance.
             Ability to define own numeric risk free rate.
         '''
         
@@ -495,42 +537,70 @@ class Valuation:
         self.beta = np.polyfit(mkt_prem, ex_ret,1)[0]
         return self.beta
     
-    def UnleveredBeta(self, industry, tax = None , firm_de = None):
+    def BottomUpBeta(self, industry, weights = None, tax = None , firm_de = None):
+        
         '''
-        Returns unlevered beta according to the industry classification of Damodaran.
+        Returns bottom up beta according to the industry classification of Damodaran.
         Assigns the value to the beta attribute.
+        
+        If list of industries and weights is given, the industry unlevered beta is computed
+        as the weighted average of the respective betas.
         
         Args:
         ----------------
-        industry: str
+        industry: str, list
             Industry according to the Damodaran classification.
+        weights: list
+            List of weights corresponding to industries
         tax: int, float, by default None
             Effective Tax rate for the calculation.
             If None effective tax rate from the last quarterly report is used.
         firm_de: int, float, default None
             Company's net debt to market value of equity ratio.
-            If None last quarterly report ratio is used.
+            If None ratio from the last quarterly report is used.
+            
+        Raises
+        ----------------
+        AssertionError if weights are defined but industry is not a list
+        AssertionError if weights are defined and dimensions of industry and weights to not match
+        AssertionError if weights are defined but do not sum up to one
         '''
+        
+        if weights:
+            assert isinstance(industry, list), f'Weights given but industry is not list argument'
+            assert len(industry) == len(weights), f'Dimensions of industry and weights do not match'
+            assert sum(weights) == 1, f'Weights do not sum up to one!'
         
         tax = self.fin.loc['Effective Tax Rate'][0] if tax is None else tax
         firm_de = self.nd/self.mktcap if firm_de is None else firm_de
-        #ind_de = IndustryData('dbtfund').parseTable().loc[industry,'Market D/E (adjusted for leases)']
-        ind_unlev_beta = IndustryData('betas').parseTable().loc[industry,'Unlevered beta']
-        self.beta = ind_unlev_beta*(1+firm_de*(1-tax))
+        betas = IndustryData('betas').parseTable().loc[industry, 'Unlevered beta']
+        if isinstance(industry, list):
+            ind_unlev_beta = sum([i * j for i, j in zip(betas, weights)])
+            self.beta = ind_unlev_beta*(1+firm_de*(1-tax))
+        if isinstance(industry, str):
+            self.beta = betas*(1+firm_de*(1-tax))
+        
         return self.beta
+            
     ###------------------------------------------------------------------------------------------------------------------------------------------------
     def CostofEquity(self, rf = None, rp = "hist"):
         '''
         Returns computed Cost of Equity using the before specified beta (by default 5y monthly CAPM beta). Assigns the value to the
         `ke` attribute.
         
+        Risk free rate by default is smoothed rate on 10Y Treasury bond. 'Smoothed' meaning average value across the last 30 days.
+        
         Args:
         ----------------
-        rf: None, int, float
+        rf: int, float, default None
             By default 10Y Treasury Bond is used as risk-free rate. User defined (int, float) value can be specified.
         rp: str, int, float, default 'hist'
-            Either 'hist' for historical equity risk premium and 'impl' for equity risk premium according to Damodaran data.
-            Alternatively, if int, float is inputed the int, float is used as the risk premium.
+            Either 'hist' for historical equity risk premium and 'impl' for implied equity risk premium according to Damodaran data.
+            Alternatively, if int, float is inputed the the corresponding value is used as the risk premium.
+            
+        Raises
+        ----------------
+        ValueError if rp argument wrongly specified (int, float, 'hist', and 'impl' entries eligible)
         '''
         
         rf = yf.Ticker('^TNX').history(start = dt.date.today() - dt.timedelta(days = 30))['Close'].mean() if rf is None else rf
@@ -544,7 +614,7 @@ class Valuation:
         elif isinstance(rp, (int, float)):
             erp = rp
         else:
-            raise ValueError(f'Invalid risk premium method: {rp}. Historical (\'hist\'), Implied (\'impl\') or integer/float value eligible.')
+            raise ValueError(f'Invalid risk premium method: {rp}. Historical (\'hist\'), Implied (\'impl\') or int/float value eligible.')
             
         self.ke = rf/100 + self.beta*erp
         
@@ -568,9 +638,11 @@ class Valuation:
         Raises:
         ----------------
         AssertionError if sum(weights) != 1
+        AssertionError if length of regions and weights arguments are not equal
         '''
         
         assert sum(weights) == 1, f'Weights do not sum up to one: {weights}'
+        assert len(regions) == len(weights), f'Lengths of regions and weights arguments not equal'
         
         tab = self.damo.getCountryRP()
         self.country_defaultspread = sum([tab.loc[tab['Region'].str.contains(r),'Default Spread'].mean()*w for r,w in zip(regions, weights)])
@@ -586,7 +658,7 @@ class Valuation:
             Optional; DefaultSpread to be assigned
         show_synthetic_rating: bool, default False
             if True method returns Damodaran's table for determining default spread using synthetic rating
-        large_cap: bool default True
+        large_cap: bool, default True
             if False table for small_cap companies' default spread is shown.
         '''
         ###ISSUE: user-input or self.calculated??
@@ -611,26 +683,29 @@ class Valuation:
         Raises:
         ----------------
         AssertionError if method is not one of book, synthetic, bond
+        ValueError if method is 'synthetic' but one of default_spread or country_defaultspread is not computed yet
         ValueError if method is 'bond' but no bond_yield has been specified
             
         '''
         
-        assert method in ['book','synthetic','bond'], f'Unavailable method: {method}. Viable methods are book, synthetic, bond'
+        assert method in ['book','synthetic','bond'], f'Unavailable method: {method}. Viable methods are book, synthetic and bond'
         
         if method == "book":
             self.kd = (-self.fin.loc['Interest Expense']/self.bal.loc['Financing Liabilities'])[0]
             
         elif method == "synthetic":
+            ##Check whether necessary attributes are set already
             if any([self.default_spread, self.country_defaultspread]) is False:
                 raise ValueError(f'One of Default Spread, Country Default Spread attributes not defined')
             else:
-                self.kd = rf + self.default_spread + self.country_defaultspread
+                self.kd = rf/100 + self.default_spread + self.country_defaultspread
                 
         elif method == "bond":
-            if not bond_yield:
+            if bond_yield is None:
                 raise ValueError(f'Bond Yield not specified: {bond_yield}')
             else:
-                self.kd = bond_yield
+                self.default_spread = bond_yield/100 - rf/100
+                self.kd = bond_yield/100
         
         return self.kd
     ###------------------------------------------------------------------------------------------------------------------------------------------------
@@ -662,15 +737,16 @@ class Valuation:
             List of net long term asset turnovers
         wct: list
             List of operating working capital turnover
-        tax: list of tax rates
+        tax: list
+            List of tax rates
         
         Raises:
         ----------------
         AssertionError if the dimensions of pm, xat, wct, and tax are not equal to the dimension of gns - 1, i.e. gns needs to be forecasted for t+1 periods.
         '''
         #Assert dimensions of thre forecasted ratio
-        assert all(len(arg) == len(gns)-1 for arg in [pm, xat, wct, tax]), 'Wrong dimensions of the inputs. The dimensions of pm, xat, wct and tax \
-        must be equal and gns must be of t+1 dimension where t is forecasted period.'
+        assert all(len(arg) == len(gns)-1 for arg in [pm, xat, wct, tax]), 'Wrong dimensions of the inputs. The dimensions of pm, xat, wct and tax\
+        must be equal and gns must be of t+1 dimension where t is length of the forecasted period.'
         
         gns = [1 + g for g in gns]
         mult_gns = [math.prod(gns[:i]) for i in range(1, len(gns)+1)]
@@ -682,14 +758,42 @@ class Valuation:
         IC = [i + j for i, j in zip(NTA, WC)]
         delta_IC = [IC[0] - self.bal.loc['Invested Capital'][0]]
         delta_IC.extend([subitem for subitem in [IC[i+1] - IC[i] for i in range(0,len(IC)-1)]])
-        FCF = [i + j for i, j in zip(NOPLAT, IC)]
-        ROIC = [i/j for i, j in zip(NOPLAT, IC)]
+        FCF = [i - j for i, j in zip(NOPLAT, delta_IC)]
+        ROIC = [i / j for i, j in zip(NOPLAT, IC)]
         
         self.forecast = pd.DataFrame([NetSales, EBIT, NOPLAT, NTA, WC, IC, delta_IC, FCF, ROIC], 
-                            index = ['Net Sales', 'EBIT','NOPLAT', 'Net Fixed Assets',
+                                     index = ['Net Sales', 'EBIT','NOPLAT', 'Net Fixed Assets',
                                      'Working Capital', 'Invested Capital', 'Change in IC',
                                      'Free Cash Flow', 'ROIC'])
-        return self.forecast
+    def getForecastTable(self):
+        
+        '''
+        Returns comprehensive forecasted table together with historical coutnerparts for more insight
+        
+        Raises
+        ----------------
+        AssertionError if forecast has not been made (forecast attribute is None)
+        
+        '''
+        
+        assert self.forecast is not None, f'Forecast has not been made yet. .forecast attribute is None!'
+        
+        table = pd.concat([self.fin.loc[['Total Revenue', 'EBIT', 'NOPLAT']],self.bal.loc[['NTA', 'Operating Working Capital','Invested Capital']]],
+                          axis = 0)
+        table.index = ['Net Sales', 'EBIT', 'NOPLAT', 'Net Fixed Assets', 'Working Capital', 'Invested Capital']
+        delta_IC = self.bal.loc['Invested Capital'].diff(-1)
+        fcf = self.fin.loc['NOPLAT'] - delta_IC
+        table.loc['Change in IC'] = delta_IC
+        table.loc['Free Cash Flow'] = fcf
+        table.loc['ROIC'] = self.fin_analysis.loc['ROIC']
+        table.columns = self.fin.columns.year
+        ###Reverse Order of columns
+        table = table.iloc[:, ::-1]
+        forecast_table = pd.concat([table, self.forecast], axis = 1, keys = ['Historical','Forecasted'])
+        cols = [self.fin.columns.year[0] + i for i in range(1, self.forecast.shape[1]+1)]
+        cols.extend(self.fin.iloc[:, ::-1].columns.year)
+        forecast_table.columns.set_levels(cols, level = 1, inplace = True)
+        return forecast_table
     
     def HorizonValue(self, gns, roic, ronic, wacc_cont = None):
         '''
@@ -698,7 +802,7 @@ class Valuation:
         Args:
         ----------------
         gns: int, float
-            Continuing growth rate (growth in net sales).
+            Continuing growth rate (growth in net sales). Should be the growth rate (gns) used in explicit forecast.
         roic: int, float
             Return on invested capital. Typically, last ROIC from the explicit forecast.
         ronic: int, float
@@ -714,17 +818,22 @@ class Valuation:
         Warning:
             if gns is larger than wacc_cont or wacc, produces negative horizon value
         '''
+        
         if wacc_cont is None:
-            wacc_cont = self.wacc
-            
-        if gns > wacc_cont:
+            if not self.wacc:
+                raise ValueError(f'WACC has not been set')
+            self.horizon_wacc = self.wacc
+        else:
+            self.horizon_wacc = wacc_cont
+        if gns > self.horizon_wacc:
             warnings.warn(f'WARNING: gns > wacc will result in negative value')
-        elif gns == wacc_cont:
+        elif gns == self.horizon_wacc:
             raise ZeroDivisionError(f'Dividing by zero, gns == wacc')
-        self.hv = (self.forecast.loc['Invested Capital'][self.forecast.shape[1]-2]*roic*(1-gns/ronic))/(wacc_cont-gns)
+        self.hv = (self.forecast.loc['Invested Capital'][self.forecast.shape[1]-2]*roic*(1-gns/ronic))/(self.horizon_wacc-gns)
         return self.hv
     
-    def getPV(self, wacc_cont = None, out = "eqval"):
+    def getPV(self, out = "eqval"):
+        
         '''
         Returns the present value of the cash flow, i.e. estimate value of the equity based on explicit forecast
         and horizon value previously computed. Assigns the value to the attribute estimate.
@@ -746,26 +855,28 @@ class Valuation:
 
         if not self.wacc:
             raise ValueError(f'WACC has not been set. Computation of PV of FCF from the forecast requires WACC')
-        if not wacc_cont:
-            wacc_cont = self.wacc
         
         pv = sum([self.forecast.loc['Free Cash Flow'][i]/(1+self.wacc)**(i+1) for i in range(self.forecast.shape[1]-1)])
-        pv_cont = self.hv/(1+ wacc_cont)**(self.forecast.shape[1]-1)
+        pv_cont = self.hv/(1+ self.horizon_wacc)**(self.forecast.shape[1]-1)
         self.estimate = pv + pv_cont - self.nd
         if out == "eqval":
-            return pv + pv_cont - self.nd
+            return self.estimate
         elif out == 'pps':
             try:
-                return (pv+pv_cont - self.nd)/self.yfticker.info['impliedSharesOutstanding']
+                return self.estimate/self.yfticker.info['impliedSharesOutstanding']
             except (KeyError, TypeError, ZeroDivisionError):
-                return (pv+pv_cont - self.nd)/self.yfticker.info['sharesOutstanding']
+                return self.estimate/self.yfticker.info['sharesOutstanding']
 
     ###------------------------------------------------------------------------------------------------------------------------------------------------
 
-    def SensitivityAnalysis(self, gns, ronic, range1 = None, range2 = None, plot = False, cmap = 'spring'):
+    def SensitivityAnalysis(self, gns, ronic, roic = None, range1 = None, range2 = None, plot = False, cmap = 'spring'):
+        
         '''
         Returns two-input sensitivity analysis table or plot. Sensitivity analysis based on varying ROIC and WACC values.
         
+        Table returns values in millions. If the WACC rates differ in the explicit forecast value and horizon value,
+        triple sensitivity table is given with maintaining constant spread between WACC and horizon/normalised WACC (nWACC).
+        If the WACC rates differ plot option is not available.
         
         Args:
         ----------------
@@ -783,36 +894,122 @@ class Valuation:
             If plot is False returns sensitivity table, if True returns sensitivity plot.
         cmap: matplotlib colormap, default 'spring'
             Colormap for the sensitivty plot. By default 'spring'.
+        
+        Raises
+        ----------------
+        ValueError if plot is True when explicit forecast WACC (.wacc attribute) and horizon value WACC (.horizon_wacc attribute) are not equal.
         '''
-        
-        roic = self.forecast.loc['ROIC'][self.forecast.shape[1]-2]
-        range1 = np.arange(self.wacc - .03, self.wacc + .03, .005) if range1 is None else range1
-        range2 = np.arange(roic - .10, roic + .20,.02) if range2 is None else range2
-        
-        forecast_range = [sum([self.forecast.loc['Free Cash Flow'][i]/(1+wacc)**(i+1) for i in range(self.forecast.shape[1]-1)]) for wacc in range1]
-        horizon_range = [[(self.forecast.loc['Invested Capital'][self.forecast.shape[1]-2]*r*(1-gns/ronic))/(w-gns) for r in range2] for w in range1]
-        pv_range = [i + j - self.nd  for i, j in zip(horizon_range, forecast_range)]
-        tab = pd.DataFrame(pv_range, index = range1, columns = range2)
-        tab.index.name = 'WACC'
-        tab.columns.name = 'ROIC'
+        if self.wacc != self.horizon_wacc and plot is True:
+            raise ValueError(f'Plot option is not available for triple variable sensitivity table.')
 
-        if plot is False:
-            tab.index = ['{:.2%}'.format(x) for x in range1]
+        if self.wacc == self.horizon_wacc:
+            roic = self.forecast.loc['ROIC'][self.forecast.shape[1]-2] if roic is None else roic
+            ic = self.forecast.loc['Invested Capital'][self.forecast.shape[1]-2]
+            range1 = np.arange(self.wacc - .03, self.wacc + .03, .005) if range1 is None else range1
+            range2 = np.arange(roic - .10, roic + .20,.02) if range2 is None else range2
+
+            forecast_range = [sum([self.forecast.loc['Free Cash Flow'][i]/(1+wacc)**(i+1) for i in range(self.forecast.shape[1]-1)]) for wacc in range1]
+            horizon_range = [[((ic*r*(1-gns/ronic))/(w-gns))/(1+w)**(self.forecast.shape[1]-1) for r in range2] for w in range1]
+            pv_range = [i + j - self.nd  for i, j in zip(horizon_range, forecast_range)]
+            
+            tab = pd.DataFrame(pv_range, index = range1, columns = range2)
+            tab.index.name = 'WACC'
+            tab.columns.name = 'ROIC'
+
+            if plot is False:
+                tab.index = ['{:.2%}'.format(x) for x in range1]
+                tab.columns = ['{:.2%}'.format(x) for x in range2]
+                tab.index.name = 'WACC'
+                tab.columns.name = 'ROIC'
+                
+                return tab.style.format(lambda x:'{:,.0f}'.format(x/10**6)).background_gradient(cmap = cmap)
+            
+            elif plot is True:
+                tab = pd.melt(tab, value_name = 'Value', ignore_index = False).reset_index()
+                r1_diff = np.diff(range1).mean()
+                r2_diff = np.diff(range2).mean()
+                fig, ax = plt.subplots(figsize = (12,8))
+                s = ax.scatter(x = 'WACC', y = 'ROIC', c = 'Value',
+                               data = tab,
+                               cmap = cmap)
+                ax.text(x = self.wacc, y = roic, s = self.ticker, 
+                        ha = 'center', va = 'center',
+                        fontsize = 12, fontfamily = 'Helvetica')
+                r = patches.Rectangle((self.wacc - 2*r1_diff, roic - 3*r2_diff),
+                                      width = 4*r1_diff,
+                                      height = 6*r2_diff,
+                                      alpha = .1, color = 'lightcoral')
+                ax.add_patch(r)
+                ax.set_xlabel('WACC')
+                ax.set_ylabel('ROIC')
+                fig.colorbar(s)
+                plt.show()
+        else:
+            roic = self.forecast.loc['ROIC'][self.forecast.shape[1]-2] if roic is None else roic
+            ic = self.forecast['Invested Capital'][self.forecast.shape[1]-2]
+            range1 = np.arange(self.wacc - .03, self.wacc + .03, .005) if range1 is None else range1
+            range2 = np.arange(roic - .10, roic + .20,.02) if range2 is None else range2
+            range3 = range1 + (self.horizon_wacc - self.wacc)
+
+            forecast_range = [sum([self.forecast.loc['Free Cash Flow'][i]/(1+wacc)**(i+1) for i in range(self.forecast.shape[1]-1)]) for wacc in range1]
+            horizon_range = [[((ic*r*(1-gns/ronic))/(w-gns))/(1+w)**(self.forecast.shape[1]-1) for r in range2] for w in range3]
+            pv_range = [i + j - self.nd  for i, j in zip(horizon_range, forecast_range)]
+            
+            multi_cols = pd.MultiIndex.from_arrays([range3, range1])
+            
+            tab = pd.DataFrame(pv_range, index = multi_cols, columns = range2)
+            tab.index.set_names(['nWACC','WACC'], inplace = True)
+            tab.columns.name = 'ROIC'
             tab.columns = ['{:.2%}'.format(x) for x in range2]
-            tab.applymap(lambda x: '{:,.0f}'.format(x/10**6))
-            return tab
-        elif plot is True:
-            tab = pd.melt(tab, value_name = 'Value', ignore_index = False).reset_index()
-            r1_diff = np.diff(range1).mean()
-            r2_diff = np.diff(range2).mean()
-            fig, ax = plt.subplots(figsize = (12,8))
-            s = ax.scatter(x = 'WACC', y = 'ROIC', c = 'Value', data = tab, cmap = cmap)
-            ax.text(x = self.wacc, y = roic, s = self.ticker, 
-                    ha = 'center', va = 'center', fontsize = 14, fontfamily = 'Helvetica')
-            r = patches.Rectangle((self.wacc - 2*r1_diff, roic - 3*r2_diff),
-                                  width = 4*r1_diff, height = 6*r2_diff, alpha = .4, color = 'lightcoral')
-            ax.add_patch(r)
-            ax.set_xlabel('WACC')
-            ax.set_ylabel('ROIC')
-            fig.colorbar(s)
+            tab.index = tab.index.set_levels(['{:.2%}'.format(x) for x in range3], level = 0)
+            tab.index  = tab.index.set_levels(['{:.2%}'.format(x) for x in range1], level = 1)
+
+            return tab.style.format(lambda x:'{:,.0f}'.format(x/10**6)).background_gradient(cmap = cmap)
+        
+    
+    
+    def Benchmark(self, tickers = None, period = ''):
+        
+        ret = (1 + self.yfticker.history(period = period)['Close'].pct_change()).cumprod()
+        
+        fig, ax = plt.subplots(figsize = (12, 8))
+        
+        if not tickers:
+            
+            sector_index = SPDR_ETF.get(self.sector)
+            sp_ret = sp_ret = (1 + yf.Ticker('^GSPC').history(period = period)['Close'].pct_change()).cumprod()
+            nasdaq_ret = (1 + yf.Ticker('^IXIC').history(period = period)['Close'].pct_change()).cumprod()
+            sector_ret = (1 + yf.Ticker(sector_index).history(period = period)['Close'].pct_change()).cumprod()
+            
+            ax.plot(ret, color = 'royalblue', label = self.ticker, lw = .8)
+            ax.plot(sp_ret, color = 'orangered', label = 'S&P 500', lw = .8)
+            ax.plot(nasdaq_ret, color = 'darkorchid', label  = 'NASDAQ', lw = .8)
+            ax.plot(sector_ret, color = 'silver', label = sector_index, lw = .8)
+            
+            ax.yaxis.set_major_formatter(lambda x,p: '${:.2f}'.format(x))
+            ax.set_title(f'Index Benchmarking ({self.ticker})', font = 'Avenir', fontsize = 14)
+
+            ax.grid(axis = 'x')
+            ax.legend(fontsize = 12)
+
             plt.show()
+            
+        if tickers:
+            
+            t = yf.Tickers(" ".join(tickers).upper())
+            prices = t.history(period = period)['Close']
+            cumulative_return = (1 + prices.pct_change()).cumprod()
+            
+            ax.plot(ret, label = self.ticker)
+            
+            for stock in [t.upper() for t in tickers]:
+                ax.plot(cumulative_return[stock], label = stock, lw = .7)
+            
+            ax.yaxis.set_major_formatter(lambda x,p: '${:.2f}'.format(x))
+            ax.grid(axis = 'x')
+            ax.set_title(f'Benchmarking ({self.ticker})', font = 'Avenir', fontsize = 14)
+            
+            plt.show()
+            
+            
+            
